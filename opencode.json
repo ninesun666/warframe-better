@@ -1,0 +1,17 @@
+{
+  "provider": {
+    "sitech": {
+      "name": "sitech",
+      "npm": "@ai-sdk/openai-compatible",
+      "models": {
+        "Qwen2.5-32B-Instruct-AWQ": {
+          "name": "Qwen2.5-32B-Instruct-AWQ"
+        }
+      },
+      "options": {
+        "baseURL": "https://aicp.teamshub.com/ai-paas/ai-open/sitech/aiopen/stream/Qwen2.5-32B-Instruct-AWQ/v1/"
+      }
+    }
+  },
+  "$schema": "https://opencode.ai/config.json"
+}
