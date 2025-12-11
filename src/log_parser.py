@@ -38,6 +38,36 @@ CONSERVATION_AGENT_PATTERN = re.compile(
     r'AI \[Info\]: OnAgentCreated /(Npc/Common(?:Female|Male)?(\w+)Agent\d+)'
 )
 
+# 小小黑生成事件
+ROGUE_ACOLYTE_SPAWN = re.compile(r'LotusGameRules\.lua: spawned persistent enemy!')
+ROGUE_ACOLYTE_KILLED = re.compile(r'LotusGameRules\.lua: persistent enemy was killed!')
+ACOLYTE_TAUNT = re.compile(r'/Lotus/Sounds/Dialog/Taunts/Acolytes/RogueAcolyteTaunt')
+ACOLYTE_DEFEAT = re.compile(r'RogueAcolyteDefeat')
+
+# === 奖励相关 ===
+SURVIVAL_REWARD_CYCLE = re.compile(r'SurvivalMission\.lua: Survival: Host reward (\d+)')
+MISSION_SUCCESS = re.compile(r'EndOfMatch\.lua: Mission Succeeded')
+MISSION_FAILED = re.compile(r'EndOfMatch\.lua: Mission Failed')
+SYNDICATE_XP_BASE = re.compile(r'SyndicateXP base for mission: (\d+)')
+SYNDICATE_XP_FINAL = re.compile(r'SyndicateXP post multiplier: (\d+)')
+REWARD_ITEM = re.compile(r'GiveInventoryItem\.lua: Giving (.+) to player')
+EXTRA_REWARD = re.compile(r'LotusGameRules\.lua: Extra reward: (.+)')
+CREDITS_REWARD = re.compile(r'CreditsReward\.lua: Awarding (\d+) credits')
+AFFINITY_REWARD = re.compile(r'Affinity\.lua: Awarding (\d+) affinity')
+ENDLESS_EXTRACT_REWARD = re.compile(r'EndlessMission\.lua: Extract reward: (.+)')
+
+# === 地图信息 ===
+LEVEL_LOADED = re.compile(r'Level loaded: (.+)')
+MISSION_INFO = re.compile(r'Mission: (.+)')
+NODE_LOADED = re.compile(r'Loading level (.+)')
+PLANET_INFO = re.compile(r'OnLevelLoaded: (.+)')
+
+# === 玩家状态 ===
+PLAYER_STATE_CHANGE = re.compile(r'PlayerScript\.lua: (\w+) -> (\w+)')
+PLAYER_DEATH = re.compile(r'PlayerScript\.lua: Player died')
+PLAYER_REVIVE = re.compile(r'PlayerScript\.lua: Player revived')
+
+
 # 进图检测：除了时间戳跳跃，也可通过首次大量 AI 日志判断
 MISSION_START_THRESHOLD = 3  # 5 秒内出现 ≥3 个敌人视为新任务
 
@@ -50,6 +80,17 @@ class LogMonitor:
             on_mission_start: Optional[Callable[[], None]] = None,
             on_mission_end: Optional[Callable[[], None]] = None,
             on_conservation_refresh: Optional[Callable[[str, tuple], None]] = None,  # ← 新增
+            on_reward_cycle: Optional[Callable[[int], None]] = None,          # 生存轮次
+            on_mission_success: Optional[Callable[[], None]] = None,          # 任务成功
+            on_syndicate_xp: Optional[Callable[[int, int], None]] = None,     # 集团声望 (base, final)
+            on_drop: Optional[Callable[[Dict[str, Any]], None]] = None,       # 所有掉落（含弹药）
+            on_valuable_drop: Optional[Callable[[Dict[str, Any]], None]] = None,  # 有价值的掉落（非弹药）
+            on_player_state_change: Optional[Callable[[str, str], None]] = None,  # from → to
+            on_player_death: Optional[Callable[[], None]] = None,
+            on_player_revive: Optional[Callable[[], None]] = None,
+on_reward_received: Optional[Callable[[Dict[str, Any]], None]] = None,  # ← 新增：奖励接收
+            on_mission_complete: Optional[Callable[[bool], None]] = None,  # ← 新增：任务完成 (成功/失败)
+            on_level_loaded: Optional[Callable[[str], None]] = None,  # ← 新增：地图加载
             debug: bool = False,  # ← 新增：是否打印原始日志
     ):
         # ... 其他初始化 ...
@@ -68,8 +109,27 @@ class LogMonitor:
         self._recent_agent_time = 0.0
         self._running = True
 
+        self.on_reward_cycle = on_reward_cycle or (lambda x: None)
+        self.on_mission_success = on_mission_success or (lambda: None)
+        self.on_syndicate_xp = on_syndicate_xp or (lambda b, f: None)
+        self.on_drop = on_drop or (lambda x: None)
+        self.on_valuable_drop = on_valuable_drop or (lambda x: None)
+        self.on_player_state_change = on_player_state_change or (lambda f, t: None)
+        self.on_player_death = on_player_death or (lambda: None)
+        self.on_player_revive = on_player_revive or (lambda: None)
+        self.on_reward_received = on_reward_received or (lambda x: None)
+        self.on_mission_complete = on_mission_complete or (lambda success: None)
+        self.on_level_loaded = on_level_loaded or (lambda level: None)
+
         self.conservation_active = True
         self.conservation_animals = []  # 存储 {type, agent, pos, time}
+        self.rewards = []  # 存储奖励信息 {type, name, amount, time, cycle}
+        self.current_level = None  # 当前地图信息
+
+        # 内部状态
+        self.syndicate_xp_base = 0
+        self.syndicate_xp_final = 0
+        self.player_state = "unknown"
 
     def parse_vector(self, s: str) -> Optional[tuple]:
         """解析 Vector(x,y,z) 字符串为浮点元组"""
@@ -114,6 +174,42 @@ class LogMonitor:
             if self.last_timestamp > 0 and current_ts - self.last_timestamp > 5000:
                 self.reset_mission()
             self.last_timestamp = current_ts
+
+# === 地图信息检测 ===
+            level_match = LEVEL_LOADED.search(line)
+            if level_match:
+                level_name = level_match.group(1)
+                self.current_level = level_name
+                self.on_level_loaded(level_name)
+                if self.debug:
+                    print(f"[DEBUG] 地图加载: {level_name}")
+
+            mission_match = MISSION_INFO.search(line)
+            if mission_match:
+                mission_name = mission_match.group(1)
+                if not self.current_level:  # 如果没有地图信息，用任务信息代替
+                    self.current_level = mission_name
+                    self.on_level_loaded(mission_name)
+                if self.debug:
+                    print(f"[DEBUG] 任务信息: {mission_name}")
+
+            node_match = NODE_LOADED.search(line)
+            if node_match:
+                node_name = node_match.group(1)
+                if not self.current_level:
+                    self.current_level = node_name
+                    self.on_level_loaded(node_name)
+                if self.debug:
+                    print(f"[DEBUG] 节点加载: {node_name}")
+
+            planet_match = PLANET_INFO.search(line)
+            if planet_match:
+                planet_name = planet_match.group(1)
+                if not self.current_level:
+                    self.current_level = planet_name
+                    self.on_level_loaded(planet_name)
+                if self.debug:
+                    print(f"[DEBUG] 星球信息: {planet_name}")
 
             # 检测新任务：方式2 - 短时间内密集生成敌人（更可靠）
             if not self.mission_active:
@@ -185,9 +281,119 @@ class LogMonitor:
                 })
                 # 👉 触发“刷新小动物”回调！
                 self.on_conservation_refresh(animal_name, "")
-
                 if self.debug:
                     print(f"[DEBUG] 保育动物实体创建: {animal_name} ({full_path})")
+
+            # 生存轮次
+            surv_match = SURVIVAL_REWARD_CYCLE.search(line)
+            if surv_match:
+                cycle = int(surv_match.group(1))
+                self.on_reward_cycle(cycle)
+
+            # 任务成功
+            if MISSION_SUCCESS.search(line):
+                self.on_mission_success()
+
+            # 集团声望
+            if xp_base := SYNDICATE_XP_BASE.search(line):
+                self.syndicate_xp_base = int(xp_base.group(1))
+            if xp_final := SYNDICATE_XP_FINAL.search(line):
+                self.syndicate_xp_final = int(xp_final.group(1))
+                self.on_syndicate_xp(self.syndicate_xp_base, self.syndicate_xp_final)
+
+            # === 任务完成状态 ===
+            if MISSION_SUCCESS.search(line):
+                self.on_mission_complete(True)
+            elif MISSION_FAILED.search(line):
+                self.on_mission_complete(False)
+
+            # === 奖励检测 ===
+            # 生存轮次奖励
+            surv_match = SURVIVAL_REWARD_CYCLE.search(line)
+            if surv_match:
+                cycle = int(surv_match.group(1))
+                reward_data = {
+                    'type': 'survival_cycle',
+                    'name': f'生存轮次 {cycle}',
+                    'amount': 1,
+                    'cycle': cycle,
+                    'timestamp': current_ts,
+                    'time': datetime.now().strftime("%H:%M:%S")
+                }
+                self.rewards.append(reward_data)
+                self.on_reward_received(reward_data)
+
+            # 物品奖励
+            reward_match = REWARD_ITEM.search(line)
+            if reward_match:
+                item_name = reward_match.group(1)
+                reward_data = {
+                    'type': 'item',
+                    'name': item_name,
+                    'amount': 1,
+                    'timestamp': current_ts,
+                    'time': datetime.now().strftime("%H:%M:%S")
+                }
+                self.rewards.append(reward_data)
+                self.on_reward_received(reward_data)
+
+            # 额外奖励
+            extra_match = EXTRA_REWARD.search(line)
+            if extra_match:
+                reward_name = extra_match.group(1)
+                reward_data = {
+                    'type': 'extra',
+                    'name': reward_name,
+                    'amount': 1,
+                    'timestamp': current_ts,
+                    'time': datetime.now().strftime("%H:%M:%S")
+                }
+                self.rewards.append(reward_data)
+                self.on_reward_received(reward_data)
+
+            # 现金奖励
+            credits_match = CREDITS_REWARD.search(line)
+            if credits_match:
+                credits = int(credits_match.group(1))
+                reward_data = {
+                    'type': 'credits',
+                    'name': '现金',
+                    'amount': credits,
+                    'timestamp': current_ts,
+                    'time': datetime.now().strftime("%H:%M:%S")
+                }
+                self.rewards.append(reward_data)
+                self.on_reward_received(reward_data)
+
+            # 经验奖励
+            affinity_match = AFFINITY_REWARD.search(line)
+            if affinity_match:
+                affinity = int(affinity_match.group(1))
+                reward_data = {
+                    'type': 'affinity',
+                    'name': '经验值',
+                    'amount': affinity,
+                    'timestamp': current_ts,
+                    'time': datetime.now().strftime("%H:%M:%S")
+                }
+                self.rewards.append(reward_data)
+                self.on_reward_received(reward_data)
+
+            # 无尽任务撤离奖励
+            extract_match = ENDLESS_EXTRACT_REWARD.search(line)
+            if extract_match:
+                reward_name = extract_match.group(1)
+                reward_data = {
+                    'type': 'extract',
+                    'name': reward_name,
+                    'amount': 1,
+                    'timestamp': current_ts,
+                    'time': datetime.now().strftime("%H:%M:%S")
+                }
+                self.rewards.append(reward_data)
+                self.on_reward_received(reward_data)
+
+
 
         except Exception as e:
             # 防止单行日志错误导致整个监控崩溃
@@ -210,11 +416,14 @@ class LogMonitor:
                     # 👇 新增：debug 时打印原始日志 👇
                     if self.debug:
                         # 去掉末尾换行，避免 double \n
-                        print(f"[RAW LOG] {line.rstrip()}")
+                        print(f"[{datetime.now().strftime('%H:%M:%S')}] {line.rstrip()}")
+                        stripped_line = line.rstrip()
+                        # if 'Script [Info]' in stripped_line:
+                        #     print(f"[{datetime.now().strftime('%H:%M:%S')}] {stripped_line}")
                     # 👆 新增结束 👆
                     self.process_line(line)
                 else:
-                    time.sleep(0.5)
+                    time.sleep(0.09)
 
     def stop_monitoring(self):
         """停止监控（线程安全）"""

@@ -132,6 +132,33 @@ ENEMY_NAME_MAP: Dict[str, str] = {
     "Agent": "未知单位",
 }
 
+# === 保育动物中文映射 ===
+CONSERVATION_NAME_MAP: Dict[str, str] = {
+    "LegendaryKubrow": "斑纹库伯顿 【2000声望】",
+    "OrokinKubrow": "哨兵炽托法【1600】",
+    "PupOrokinKubrow": "哨兵炽托法pup【1600】",
+    "SnowRodent": "阳光泡博【400】",
+    "Kubrodon": "库伯龙",
+    "KubrodonAlpha": "库伯龙首领",
+    "Bola": "博拉",
+    "BolaAlpha": "博拉首领",
+    "Sawgaw": "锯鹫",
+    "SawgawAlpha": "锯鹫首领",
+    "Virmaw": "毒颚",
+    "VirmawAlpha": "毒颚首领",
+    "Stover": "斯托弗",
+    "StoverAlpha": "斯托弗首领",
+    "Condroc": "康卓克",
+    "CondrocAlpha": "康卓克首领",
+    "Mergoo": "默古",
+    "MergooAlpha": "默古首领",
+    "Horrasque": "霍拉斯克",
+    "HorrasqueAlpha": "霍拉斯克首领",
+    "InfestedKubrow": "感染者库伯顿",
+    "SonwCritter": "弗鸣克【600】",
+    "InfestedKubrowPup": "感染者库伯顿幼崽",
+}
+
 
 def get_chinese_drop_name(key: str) -> str:
     """将掉落物关键字转为中文名"""
@@ -147,6 +174,8 @@ def get_chinese_drop_name(key: str) -> str:
         return "生命球"
     if "Credits" in key:
         return "现金"
+    if "Ammo" in key:
+        return "弹药"
     if any(r in key for r in
            ["Alloy", "Ferrite", "Nano", "Polymer", "Salvage", "Orokin", "Fieldron", "Detonite", "Mutagen", "Neural",
             "Argon"]):
@@ -171,5 +200,22 @@ def get_chinese_enemy_name(raw_key: str) -> str:
             if base_name in ENEMY_NAME_MAP:
                 return ENEMY_NAME_MAP[base_name]
 
-    # 最终兜底
+# 最终兜底
     return f"未知敌人 ({raw_key})"
+
+
+def get_chinese_conservation_name(key: str) -> str:
+    """将保育动物类型名转为中文名"""
+    if key in CONSERVATION_NAME_MAP:
+        return CONSERVATION_NAME_MAP[key]
+    
+    # 模糊匹配：移除常见后缀
+    base_name = key
+    for suffix in ["Pup", "Alpha"]:
+        if base_name.endswith(suffix):
+            base_name = base_name[:-len(suffix)]
+            if base_name in CONSERVATION_NAME_MAP:
+                return CONSERVATION_NAME_MAP[base_name]
+    
+    # 最终兜底
+    return f"未知动物 ({key})"
